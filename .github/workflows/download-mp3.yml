@@ -1,0 +1,91 @@
+name: Download YouTube MP3
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  download:
+    if: startsWith(github.event.issue.title, '[yt-download]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Extract YouTube URL
+        id: extract
+        env:
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: |
+          python - <<'PY'
+          import os, re
+          body = os.environ.get('ISSUE_BODY', '')
+          m = re.search(r'https?://(?:www\.)?(?:youtube\.com/watch\?[^\s]+|youtu\.be/[^\s]+)', body)
+          if not m:
+              raise SystemExit('No YouTube URL found in issue body')
+          url = m.group(0).rstrip(').,]')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as f:
+              f.write(f'url={url}\n')
+          print(f'URL: {url}')
+          PY
+
+      - name: Download and convert to MP3
+        run: |
+          mkdir -p output
+          python app.py "${{ steps.extract.outputs.url }}" --format mp3 --output-dir output
+
+      - name: List output
+        run: ls -lah output
+
+      - name: Upload MP3 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mp3-${{ github.event.issue.number }}
+          path: output/*.mp3
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Comment success
+        if: success()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: '✅ MP3 下載完成，已產生 GitHub Actions artifact。'
+            })
+
+      - name: Comment failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: '❌ MP3 下載失敗，請查看 GitHub Actions 執行紀錄。'
+            })
