@@ -3,6 +3,12 @@ name: Download YouTube MP3
 on:
   issues:
     types: [opened]
+  workflow_dispatch:
+    inputs:
+      url:
+        description: YouTube video URL
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -10,7 +16,7 @@ permissions:
 
 jobs:
   download:
-    if: startsWith(github.event.issue.title, '[yt-download]')
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.issue.title, '[yt-download]')
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -33,27 +39,54 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Extract YouTube URL
+      - name: Resolve YouTube URL
         id: extract
         env:
+          EVENT_NAME: ${{ github.event_name }}
           ISSUE_BODY: ${{ github.event.issue.body }}
+          DISPATCH_URL: ${{ inputs.url }}
         run: |
           python - <<'PY'
           import os, re
-          body = os.environ.get('ISSUE_BODY', '')
-          m = re.search(r'https?://(?:www\.)?(?:youtube\.com/watch\?[^\s]+|youtu\.be/[^\s]+)', body)
+          candidate = os.environ.get('DISPATCH_URL', '') if os.environ.get('EVENT_NAME') == 'workflow_dispatch' else os.environ.get('ISSUE_BODY', '')
+          m = re.search(r'https?://(?:www\.)?(?:youtube\.com/watch\?[^\s]+|youtu\.be/[^\s]+)', candidate)
           if not m:
-              raise SystemExit('No YouTube URL found in issue body')
+              raise SystemExit('No YouTube URL found')
           url = m.group(0).rstrip(').,]')
           with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as f:
               f.write(f'url={url}\n')
           print(f'URL: {url}')
           PY
 
+      - name: Restore YouTube cookies
+        env:
+          YOUTUBE_COOKIES_B64: ${{ secrets.YOUTUBE_COOKIES_B64 }}
+        run: |
+          if [ -n "$YOUTUBE_COOKIES_B64" ]; then
+            printf '%s' "$YOUTUBE_COOKIES_B64" | base64 --decode > "$RUNNER_TEMP/youtube-cookies.txt"
+            chmod 600 "$RUNNER_TEMP/youtube-cookies.txt"
+            echo "YT_COOKIE_ARGS=--cookies $RUNNER_TEMP/youtube-cookies.txt" >> "$GITHUB_ENV"
+            echo "YouTube cookies loaded."
+          else
+            echo "YT_COOKIE_ARGS=" >> "$GITHUB_ENV"
+            echo "No YOUTUBE_COOKIES_B64 secret configured; public downloads may be blocked from GitHub-hosted runners."
+          fi
+
       - name: Download and convert to MP3
         run: |
           mkdir -p output
-          python app.py "${{ steps.extract.outputs.url }}" --format mp3 --output-dir output
+          yt-dlp \
+            --no-playlist \
+            --js-runtimes node \
+            $YT_COOKIE_ARGS \
+            --extract-audio \
+            --audio-format mp3 \
+            --audio-quality 192K \
+            --embed-metadata \
+            --windows-filenames \
+            --trim-filenames 180 \
+            --output 'output/%(title)s [%(id)s].%(ext)s' \
+            "${{ steps.extract.outputs.url }}"
 
       - name: List output
         run: ls -lah output
@@ -61,13 +94,13 @@ jobs:
       - name: Upload MP3 artifact
         uses: actions/upload-artifact@v4
         with:
-          name: mp3-${{ github.event.issue.number }}
+          name: mp3-${{ github.run_number }}
           path: output/*.mp3
           if-no-files-found: error
           retention-days: 7
 
       - name: Comment success
-        if: success()
+        if: success() && github.event_name == 'issues'
         uses: actions/github-script@v7
         with:
           script: |
@@ -79,7 +112,7 @@ jobs:
             })
 
       - name: Comment failure
-        if: failure()
+        if: failure() && github.event_name == 'issues'
         uses: actions/github-script@v7
         with:
           script: |
@@ -87,5 +120,5 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
-              body: '❌ MP3 下載失敗，請查看 GitHub Actions 執行紀錄。'
+              body: '❌ MP3 下載失敗。若 log 顯示 YouTube 要求登入，請設定 Repository Secret `YOUTUBE_COOKIES_B64` 後重試。'
             })
