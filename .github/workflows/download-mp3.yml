@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   download:
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.issue.title, '[yt-download]')
+    if: github.event_name == 'workflow_dispatch' || (startsWith(github.event.issue.title, '[yt-download]') && github.event.issue.user.login == github.repository_owner)
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
